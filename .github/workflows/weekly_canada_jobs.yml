@@ -1,0 +1,78 @@
+name: Weekly Canada Job Refresh
+
+on:
+  schedule:
+    # Monday at 13:17 UTC (9:17 AM Toronto during DST, 8:17 AM in winter).
+    # GitHub Actions cron is UTC-only. The non-round minute reduces scheduler load.
+    - cron: "17 13 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: canada-jobs-refresh
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out customized branch
+        uses: actions/checkout@v4
+        with:
+          ref: dev
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Pull the latest upstream listings database
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/SimplifyJobs/New-Grad-Positions.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/SimplifyJobs/New-Grad-Positions.git
+          git fetch --depth=1 upstream dev
+          git show upstream/dev:.github/scripts/listings.json \
+            > .github/scripts/listings.json
+
+      - name: Test Canada location filtering
+        run: python .github/scripts/test_canada_filter.py
+
+      - name: Check active Canadian job links
+        run: |
+          python .github/scripts/check_canadian_jobs.py \
+            --report /tmp/canada-job-check-report.json
+
+      - name: Generate Canada-only README
+        id: generate
+        run: python .github/scripts/update_readmes.py
+
+      - name: Upload detailed link-check report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: canada-job-check-report
+          path: /tmp/canada-job-check-report.json
+          if-no-files-found: warn
+          retention-days: 30
+
+      - name: Commit and push changes
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add README.md .github/scripts/listings.json
+
+          if git diff --cached --quiet; then
+            echo "No Canadian job changes to commit."
+            exit 0
+          fi
+
+          count="${{ steps.generate.outputs.canadian_job_count }}"
+          git commit -m "chore: weekly Canada jobs refresh (${count:-unknown} active)"
+          git push origin HEAD:dev
